@@ -451,7 +451,7 @@ td{padding:12px 16px;font-size:13px;vertical-align:middle;}
       <div class="fi"><label>Příjmení *</label><input type="text" id="f-lastname" placeholder="Novák"></div>
       <div class="fi"><label>E-mail *</label><input type="email" id="f-email" placeholder="vas&#64;email.cz"></div>
       <div class="fi"><label>Telefon</label><input type="tel" id="f-phone" placeholder="+420 123 456 789"></div>
-      <div class="fi" style="display:flex;align-items:center;gap:10px;border:none;padding:4px 0;">
+      <div class="fi fi-multi-wrap" style="display:flex;align-items:center;gap:10px;border:none;padding:4px 0;">
         <input type="checkbox" id="f-multi" style="width:18px;height:18px;cursor:pointer;" onchange="toggleGuests(this)">
         <label for="f-multi" style="margin:0;cursor:pointer;font-weight:400;">Rezervuji pro více lidí</label>
       </div>
@@ -700,21 +700,16 @@ function nameToAbbr(fullName){
 
 async function addToCalendarDirectly(entry){
   try{
-    // Sestav nazev s zkratkami ucastniku
-    var abbr=nameToAbbr(entry.name);
-    // Pokud jsou hosté, přidej jejich zkratky
+    // Sestav nazev - hlavni ucastnik + hosté
+    var title=entry.name;
     if(entry.note&&entry.note.indexOf('Další účastníci:')!==-1){
       var guestsPart=entry.note.split('Další účastníci:')[1].trim();
-      var guestNames=guestsPart.split(',');
-      guestNames.forEach(function(g){
-        var ga=nameToAbbr(g.trim());
-        if(ga)abbr+=' + '+ga;
-      });
+      title+=', '+guestsPart;
     }
-    var entryWithAbbr=Object.assign({},entry,{calAbbr:abbr});
-    var url = APPS_URL+'?action=addToCalendar&data='+encodeURIComponent(JSON.stringify(entryWithAbbr));
+    var entryWithTitle=Object.assign({},entry,{calTitle:title});
+    var url = APPS_URL+'?action=addToCalendar&data='+encodeURIComponent(JSON.stringify(entryWithTitle));
     await fetch(url,{cache:'no-store'});
-    console.log('Pripsano do kalendare:', entry.id, abbr);
+    console.log('Pripsano do kalendare:', entry.id, title);
   }catch(e){console.warn('Calendar write error:',e.message);}
 }
 
@@ -1111,6 +1106,10 @@ function submitBk(){
   var initStatus = needsApproval ? 'pending' : 'approved';
   var times=(bk.times&&bk.times.length>0)?bk.times:[bk.time];
   var multi=document.getElementById('f-multi')&&document.getElementById('f-multi').checked;
+  var cap2=CAP[bk.zone]||1;
+  // Rezervace pro více lidí zabírá více míst
+  var totalPeople=1+(multi?guestCount:0);
+  if(totalPeople>cap2){toast('Celkový počet účastníků ('+totalPeople+') překračuje kapacitu '+cap2+' míst.');return;}
   var guests='';
   if(multi){
     var g1f=document.getElementById('f-guest1-first').value.trim();
