@@ -690,11 +690,31 @@ async function loadRezFromServer(){
   }
 }
 
+function nameToAbbr(fullName){
+  // "Aneta Prokopcová" -> "ProkAn"
+  var parts=fullName.trim().split(' ');
+  if(parts.length<2)return fullName.substring(0,6);
+  var first=parts[0]; var last=parts[parts.length-1];
+  return last.substring(0,4)+first.substring(0,2);
+}
+
 async function addToCalendarDirectly(entry){
   try{
-    var url = APPS_URL+'?action=addToCalendar&data='+encodeURIComponent(JSON.stringify(entry));
+    // Sestav nazev s zkratkami ucastniku
+    var abbr=nameToAbbr(entry.name);
+    // Pokud jsou hosté, přidej jejich zkratky
+    if(entry.note&&entry.note.indexOf('Další účastníci:')!==-1){
+      var guestsPart=entry.note.split('Další účastníci:')[1].trim();
+      var guestNames=guestsPart.split(',');
+      guestNames.forEach(function(g){
+        var ga=nameToAbbr(g.trim());
+        if(ga)abbr+=' + '+ga;
+      });
+    }
+    var entryWithAbbr=Object.assign({},entry,{calAbbr:abbr});
+    var url = APPS_URL+'?action=addToCalendar&data='+encodeURIComponent(JSON.stringify(entryWithAbbr));
     await fetch(url,{cache:'no-store'});
-    console.log('Pripsano do kalendare:', entry.id);
+    console.log('Pripsano do kalendare:', entry.id, abbr);
   }catch(e){console.warn('Calendar write error:',e.message);}
 }
 
@@ -810,6 +830,22 @@ function goStep(n){
     }
   }
   if(n===3&&(!bk.date||!bk.time)){toast('Vyber datum a čas.');return;}
+  if(n===3){
+    // Zobraz/skryj checkbox "více lidí" dle kapacity
+    var cap=CAP[bk.zone]||1;
+    var maxGuests=cap-1; // kolik lidí navíc může vzít
+    var multiWrap=document.querySelector('.fi-multi-wrap');
+    if(multiWrap)multiWrap.style.display=maxGuests>0?'':'none';
+    // Nastav max počet hostů
+    window._maxGuests=maxGuests;
+    // Reset guest count dle kapacity
+    guestCount=1;
+    ['fi-guest2','fi-guest3'].forEach(function(id){
+      var el=document.getElementById(id);if(el)el.style.display='none';
+    });
+    var btn=document.getElementById('btn-add-guest');
+    if(btn)btn.style.display=maxGuests>1?'':'none';
+  }
   if(n===4){
     var fn=document.getElementById('f-firstname').value.trim();
     var ln=document.getElementById('f-lastname').value.trim();
@@ -1341,6 +1377,11 @@ var guestCount=1;
 function toggleGuests(cb){
   var fi=document.getElementById('fi-guests');
   if(fi)fi.style.display=cb.checked?'':'none';
+  if(cb.checked){
+    // Zobraz tlačítko přidat jen pokud kapacita dovoluje víc než 1 hosta
+    var btn=document.getElementById('btn-add-guest');
+    if(btn)btn.style.display=(window._maxGuests||3)>1?'':'none';
+  }
   if(!cb.checked){
     guestCount=1;
     ['fi-guest2','fi-guest3'].forEach(function(id){
@@ -1352,11 +1393,12 @@ function toggleGuests(cb){
   }
 }
 function addGuest(){
-  if(guestCount>=3)return;
+  var max=window._maxGuests||3;
+  if(guestCount>=max)return;
   guestCount++;
   var el=document.getElementById('fi-guest'+guestCount);
   if(el)el.style.display='';
-  if(guestCount>=3){var btn=document.getElementById('btn-add-guest');if(btn)btn.style.display='none';}
+  if(guestCount>=max){var btn=document.getElementById('btn-add-guest');if(btn)btn.style.display='none';}
 }
 
 function selNovyKlient(){
