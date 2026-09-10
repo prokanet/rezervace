@@ -488,6 +488,7 @@ td{padding:12px 16px;font-size:13px;vertical-align:middle;}
       <div class="cr"><span class="cl">Datum</span><span class="cv" id="cs-date">-</span></div>
       <div class="cr"><span class="cl">Cas</span><span class="cv" id="cs-time">-</span></div>
       <div class="cr"><span class="cl">Jméno</span><span class="cv" id="cs-name">-</span></div>
+      <div class="cr" id="cr-names" style="display:none;"><span class="cl">Účastníci</span><span class="cv" id="cs-names">-</span></div>
       <div class="cr"><span class="cl">E-mail</span><span class="cv" id="cs-email">-</span></div>
       <div class="cr" id="cs-note-row" style="display:none;"><span class="cl">Poznámka</span><span class="cv" id="cs-note">-</span></div>
     </div>
@@ -701,11 +702,7 @@ function nameToAbbr(fullName){
 async function addToCalendarDirectly(entry){
   try{
     // Sestav nazev - hlavni ucastnik + hosté
-    var title=entry.name;
-    if(entry.note&&entry.note.indexOf('Další účastníci:')!==-1){
-      var guestsPart=entry.note.split('Další účastníci:')[1].trim();
-      title+=', '+guestsPart;
-    }
+    var title=entry.allParticipants||entry.name;
     var entryWithTitle=Object.assign({},entry,{calTitle:title});
     var url = APPS_URL+'?action=addToCalendar&data='+encodeURIComponent(JSON.stringify(entryWithTitle));
     await fetch(url,{cache:'no-store'});
@@ -1093,6 +1090,23 @@ function fillSummary(){
   document.getElementById('cs-zone').textContent=ZLABELS[bk.zone]||bk.zone;
   document.getElementById('cs-date').textContent=bk.dateLabel;
   document.getElementById('cs-time').textContent=(bk.times&&bk.times.length>1)?bk.times.join(', '):bk.time;
+  // Sestav seznam všech účastníků
+  var allNames=bk.name||'';
+  var multi=document.getElementById('f-multi')&&document.getElementById('f-multi').checked;
+  if(multi){
+    ['f-guest1','f-guest2','f-guest3'].forEach(function(base,i){
+      if(i+1>window._maxGuests)return;
+      var gf=document.getElementById(base+'-first');
+      var gl=document.getElementById(base+'-last');
+      if(gf&&gl&&gf.value.trim()&&gl.value.trim())allNames+=', '+gf.value.trim()+' '+gl.value.trim();
+    });
+  }
+  bk.allParticipants=allNames;
+  // Zobraz v souhrnu
+  var csNames=document.getElementById('cs-names');
+  if(csNames)csNames.textContent=allNames;
+  var crNames=document.getElementById('cr-names');
+  if(crNames)crNames.style.display=multi?'':'none';
   document.getElementById('cs-name').textContent=bk.name;
   document.getElementById('cs-email').textContent=bk.email;
   if(bk.note){document.getElementById('cs-note-row').style.display='';document.getElementById('cs-note').textContent=bk.note;}
@@ -1123,7 +1137,7 @@ function submitBk(){
   times.forEach(function(t){
     var eid=genId();
     var noteWithGuests=bk.note+(guests?'\nDalší účastníci: '+guests:'');
-    var e2={zone:bk.zone,date:bk.date,dateLabel:bk.dateLabel,time:t,name:bk.name,email:bk.email,phone:bk.phone,note:noteWithGuests,id:eid,status:initStatus,createdAt:new Date().toISOString()};
+    var e2={zone:bk.zone,date:bk.date,dateLabel:bk.dateLabel,time:t,name:bk.name,email:bk.email,phone:bk.phone,note:noteWithGuests,allParticipants:bk.allParticipants||bk.name,id:eid,status:initStatus,createdAt:new Date().toISOString()};
     allEntries.push(e2);
   });
   var entry=allEntries[0];
@@ -1392,8 +1406,8 @@ function toggleGuests(cb){
   }
 }
 function addGuest(){
-  var max=window._maxGuests||3;
-  if(guestCount>=max)return;
+  var max=window._maxGuests||0;
+  if(max===0||guestCount>=max)return;
   guestCount++;
   var el=document.getElementById('fi-guest'+guestCount);
   if(el)el.style.display='';
