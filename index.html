@@ -451,17 +451,26 @@ td{padding:12px 16px;font-size:13px;vertical-align:middle;}
       <div class="fi"><label>Příjmení *</label><input type="text" id="f-lastname" placeholder="Novák"></div>
       <div class="fi"><label>E-mail *</label><input type="email" id="f-email" placeholder="vas&#64;email.cz"></div>
       <div class="fi"><label>Telefon</label><input type="tel" id="f-phone" placeholder="+420 123 456 789"></div>
-      <div class="fi" id="fi-guests" style="display:none;">
-        <label>Jména dalších účastníků</label>
-        <textarea id="f-guests" placeholder="Jan Novák&#10;Jana Nováková" style="height:80px;resize:vertical;"></textarea>
-      </div>
       <div class="fi" style="display:flex;align-items:center;gap:10px;border:none;padding:4px 0;">
         <input type="checkbox" id="f-multi" style="width:18px;height:18px;cursor:pointer;" onchange="toggleGuests(this)">
         <label for="f-multi" style="margin:0;cursor:pointer;font-weight:400;">Rezervuji pro více lidí</label>
       </div>
+      <div id="fi-guests" style="display:none;">
+        <div class="fi"><label>Jméno účastníka 2 *</label><input type="text" id="f-guest1-first" placeholder="Jan"></div>
+        <div class="fi"><label>Příjmení účastníka 2 *</label><input type="text" id="f-guest1-last" placeholder="Novák"></div>
+        <div id="fi-guest2" style="display:none;">
+          <div class="fi"><label>Jméno účastníka 3 *</label><input type="text" id="f-guest2-first" placeholder="Jana"></div>
+          <div class="fi"><label>Příjmení účastníka 3 *</label><input type="text" id="f-guest2-last" placeholder="Nováková"></div>
+        </div>
+        <div id="fi-guest3" style="display:none;">
+          <div class="fi"><label>Jméno účastníka 4 *</label><input type="text" id="f-guest3-first" placeholder="Petr"></div>
+          <div class="fi"><label>Příjmení účastníka 4 *</label><input type="text" id="f-guest3-last" placeholder="Procházka"></div>
+        </div>
+        <button type="button" class="btn btn-g" id="btn-add-guest" style="margin-top:8px;padding:8px 16px;font-size:13px;" onclick="addGuest()">+ Přidat dalšího účastníka</button>
+      </div>
       <div class="fi"><label>Poznámka</label><input type="text" id="f-note" placeholder="Volitelná poznámka..."></div>
       <div class="fi" style="border:none;padding:4px 0;">
-        <div class="g-recaptcha" data-sitekey="6Le2_rMtAAAAF0GEwYjBZ5CjuQEUe_JMVI8dKDb"></div>
+        <div class="g-recaptcha" data-sitekey="6Le6DbQtAAAAAmclpYI_xJiTPHwy9SjcDHFxNQdA"></div>
       </div>
     </div>
     <div class="nav-btns">
@@ -809,7 +818,7 @@ function goStep(n){
     if(!fn||!ln){toast('Vyplň jméno a příjmení.');return;}
     if(!em||em.indexOf('@')===-1){toast('Zadej platný e-mail.');return;}
     var recaptchaResp=typeof grecaptcha!=='undefined'?grecaptcha.getResponse():'';
-    if(!recaptchaResp){toast('Potvrď že nejsi robot pomocí reCAPTCHA.');return;}
+    if(typeof grecaptcha!=='undefined'&&!recaptchaResp){toast('Potvrď že nejsi robot pomocí reCAPTCHA.');return;}
     var nm=fn+' '+ln;
     var existingRez=getRez().filter(function(r){
       return r.email.toLowerCase()===em.toLowerCase()&&r.date===bk.date&&r.time===bk.time&&r.zone===bk.zone&&(r.status==='approved'||r.status==='pending');
@@ -932,19 +941,27 @@ function buildGroupSlots(rezIgnored,grid,cap){
   // Zobraz stredy od nejblizsi budouci stredy (vcetne dneska pokud je streda)
   var today=new Date();today.setHours(0,0,0,0);
   var dow=today.getDay();
-  // Od 22.9.2026 jsou lekce v utery (2), pred tim ve stredu (3)
-  var switchDate=new Date(2026,8,22); // mesice jsou 0-indexed, 8=zari
-  var targetDay=(today>=switchDate)?2:3; // 2=utery, 3=streda
-  var daysToTarget=((targetDay-dow)+7)%7;
-  if(daysToTarget===0)daysToTarget=0; // dnes je spravny den
+  var switchDate=new Date(2026,8,22); // 22.9.2026 - prvni utery
+  // Najdi nejblizsi stredu (pred 22.9.) nebo utery (od 22.9.)
+  var baseDay=today<switchDate?3:2; // 3=streda, 2=utery
+  var daysToBase=((baseDay-dow)+7)%7;
   var firstDay=new Date(today);
-  firstDay.setDate(today.getDate()+daysToTarget);
+  firstDay.setDate(today.getDate()+daysToBase);
 
-  // Najdi vsechny terminy od nejblizsiho (9 tydnu dopredu)
+  // Najdi vsechny terminy - kazdy teden zkontroluj jestli je streda nebo utery
   var slots=[];
-  for(var w=0;w<9;w++){
-    var wed=new Date(firstDay);
-    wed.setDate(firstDay.getDate()+w*7);
+  for(var w=0;w<10;w++){
+    var candidate=new Date(firstDay);
+    candidate.setDate(firstDay.getDate()+w*7);
+    // Pokud jsme presli switchDate, posun na utery
+    if(candidate>=switchDate&&candidate.getDay()===3){
+      // Toto je streda po switchDate - preskoc, nebo posun na utery
+      candidate.setDate(candidate.getDate()-1); // streda -> utery
+    } else if(candidate<switchDate&&candidate.getDay()===2){
+      // Toto je utery pred switchDate - preskoc
+      continue;
+    }
+    var wed=candidate;
     var iso=wed.getFullYear()+'-'+String(wed.getMonth()+1).padStart(2,'0')+'-'+String(wed.getDate()).padStart(2,'0');
     ['15:30','17:00'].forEach(function(t){
       var taken=rez.filter(function(r){return r.zone==='Oxygen Capacity'&&r.date===iso&&r.time===t;}).length;
@@ -1057,7 +1074,16 @@ function submitBk(){
   var needsApproval = bk.zone==='Malá posilovna' && isGcal('Velká posilovna',bk.date,bk.time);
   var initStatus = needsApproval ? 'pending' : 'approved';
   var times=(bk.times&&bk.times.length>0)?bk.times:[bk.time];
-  var guests=document.getElementById('f-guests')?document.getElementById('f-guests').value.trim():'';
+  var multi=document.getElementById('f-multi')&&document.getElementById('f-multi').checked;
+  var guests='';
+  if(multi){
+    var g1f=document.getElementById('f-guest1-first').value.trim();
+    var g1l=document.getElementById('f-guest1-last').value.trim();
+    if(!g1f||!g1l){toast('Vyplň jméno a příjmení účastníka 2.');return;}
+    guests=g1f+' '+g1l;
+    if(guestCount>=2){var g2f=document.getElementById('f-guest2-first').value.trim();var g2l=document.getElementById('f-guest2-last').value.trim();if(!g2f||!g2l){toast('Vyplň jméno a příjmení účastníka 3.');return;}guests+=', '+g2f+' '+g2l;}
+    if(guestCount>=3){var g3f=document.getElementById('f-guest3-first').value.trim();var g3l=document.getElementById('f-guest3-last').value.trim();if(!g3f||!g3l){toast('Vyplň jméno a příjmení účastníka 4.');return;}guests+=', '+g3f+' '+g3l;}
+  }
   var allEntries=[];
   times.forEach(function(t){
     var eid=genId();
@@ -1311,9 +1337,26 @@ function renderTbl(){
     tbody.appendChild(tr);
   });
 }
+var guestCount=1;
 function toggleGuests(cb){
   var fi=document.getElementById('fi-guests');
   if(fi)fi.style.display=cb.checked?'':'none';
+  if(!cb.checked){
+    guestCount=1;
+    ['fi-guest2','fi-guest3'].forEach(function(id){
+      var el=document.getElementById(id);if(el)el.style.display='none';
+    });
+    ['f-guest1-first','f-guest1-last','f-guest2-first','f-guest2-last','f-guest3-first','f-guest3-last'].forEach(function(id){
+      var el=document.getElementById(id);if(el)el.value='';
+    });
+  }
+}
+function addGuest(){
+  if(guestCount>=3)return;
+  guestCount++;
+  var el=document.getElementById('fi-guest'+guestCount);
+  if(el)el.style.display='';
+  if(guestCount>=3){var btn=document.getElementById('btn-add-guest');if(btn)btn.style.display='none';}
 }
 
 function selNovyKlient(){
