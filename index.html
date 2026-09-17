@@ -1119,6 +1119,23 @@ function fillSummary(){
 }
 
 async function submitBk(){
+  // Zabranuje dvojitemu odeslani - submitBk je nyni async a ceka na server
+  // (fetchGcalEvs + ulozeni kazdeho slotu), takze tlacitko zustava chvili
+  // klikatelne. Druhy klik/tap behem tohoto okna dosud vytvoril duplicitni
+  // rezervace pro stejny vyber.
+  if(window._submitBkBusy)return;
+  window._submitBkBusy=true;
+  var btnSubmit=document.querySelector('button[onclick="submitBk()"]');
+  if(btnSubmit)btnSubmit.disabled=true;
+  try{
+    await submitBkImpl();
+  }finally{
+    window._submitBkBusy=false;
+    if(btnSubmit)btnSubmit.disabled=false;
+  }
+}
+
+async function submitBkImpl(){
   var id=genId();
   var times=(bk.times&&bk.times.length>0)?bk.times:[bk.time];
   var multi=document.getElementById('f-multi')&&document.getElementById('f-multi').checked;
@@ -1200,8 +1217,10 @@ async function submitBk(){
   // Posli potvrzovaci email ihned pro auto-schvalene rezervace
   if(initStatus==='approved'){
     sendConfirmEmail(entry);
-    // Zapis do Google Kalendare ihned (bez cekani na schvaleni)
-    addToCalendarDirectly(entry);
+    // Zapis do Google Kalendare ihned (bez cekani na schvaleni) - VSECHNY
+    // vybrane sloty, ne jen prvni (puvodne se pri vice slotech zapsal jen
+    // jeden termin).
+    savedEntries.forEach(function(e2){addToCalendarDirectly(e2);});
   }
   // Notifikace se posila pres saveReservation v Apps Scriptu
   document.getElementById('bk-ref').textContent='REF: #'+id;
