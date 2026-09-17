@@ -122,6 +122,9 @@ nav{display:flex;align-items:center;justify-content:space-between;padding:16px 3
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:none;cursor:pointer;font-family:'Poppins',sans-serif;font-weight:700;transition:all .2s;}
 .btn-p{padding:13px 28px;background:var(--accent);color:#ffffff;border-radius:50px;font-size:14px;}
 .btn-p:hover{background:var(--accent-h);transform:translateY(-1px);box-shadow:0 8px 28px var(--accent-glow);}
+.btn:disabled{opacity:.55;cursor:not-allowed;pointer-events:none;transform:none;box-shadow:none;}
+.btn-spin{display:inline-block;width:14px;height:14px;border-radius:50%;border:2px solid rgba(255,255,255,.45);border-top-color:#fff;animation:btnspin .7s linear infinite;}
+@keyframes btnspin{to{transform:rotate(360deg);}}
 .btn-g{padding:13px 22px;background:transparent;color:var(--muted);border:2px solid var(--border);border-radius:50px;font-size:14px;}
 .btn-g:hover{border-color:var(--border2);color:var(--text);}
 .btn-sm{padding:5px 12px;border-radius:6px;font-size:12px;}
@@ -1161,19 +1164,27 @@ function fillSummary(){
 }
 
 async function submitBk(){
-  // Zabranuje dvojitemu odeslani - submitBk je nyni async a ceka na server
-  // (fetchGcalEvs + ulozeni kazdeho slotu), takze tlacitko zustava chvili
-  // klikatelne. Druhy klik/tap behem tohoto okna dosud vytvoril duplicitni
-  // rezervace pro stejny vyber.
+  // Zabranuje dvojitemu odeslani - submitBk je async a ceka na server (ulozeni
+  // kazdeho slotu), takze bez tohoto by tlacitko zustalo chvili klikatelne a
+  // druhy klik/tap behem cekani vytvoril duplicitni rezervace pro stejny vyber.
+  // Tlacitko se navic viditelne zablokuje a zmeni popisek, aby bylo jasne, ze
+  // se rezervace odesila.
   if(window._submitBkBusy)return;
   window._submitBkBusy=true;
   var btnSubmit=document.querySelector('button[onclick="submitBk()"]');
-  if(btnSubmit)btnSubmit.disabled=true;
+  var btnOrigHtml=btnSubmit?btnSubmit.innerHTML:'';
+  if(btnSubmit){
+    btnSubmit.disabled=true;
+    btnSubmit.innerHTML='<span class="btn-spin"></span> Odesílám…';
+  }
   try{
     await submitBkImpl();
   }finally{
     window._submitBkBusy=false;
-    if(btnSubmit)btnSubmit.disabled=false;
+    if(btnSubmit){
+      btnSubmit.disabled=false;
+      btnSubmit.innerHTML=btnOrigHtml;
+    }
   }
 }
 
@@ -1195,13 +1206,15 @@ async function submitBkImpl(){
     if(guestCount>=3){var g3f=document.getElementById('f-guest3-first').value.trim();var g3l=document.getElementById('f-guest3-last').value.trim();if(!g3f||!g3l){toast('Vyplň jméno a příjmení účastníka 4.');return;}guests+=', '+g3f+' '+g3l;}
   }
 
-  // FINALNI KONTROLA PRED ODESLANIM
-  // Mezi zobrazenim slotu (buildSlots) a kliknutim na "Odeslat rezervaci" mohl v
-  // Google kalendari vzniknout novy trenink, nebo mohl slot obsadit jiny klient.
-  // Bez tohoto prekontrolovani (a bez cerstveho fetchGcalEvs() pred nim) by
-  // rezervace mohla projit i do mezitim obsazeneho/blokovaneho terminu - presne
-  // tato mezera umoznila rezervaci Velke posilovny behem naplanovaneho treninku.
-  try{ await fetchGcalEvs(); }catch(e){}
+  // RYCHLA LOKALNI KONTROLA (bez site) - jen aby se zjevne obsazeny/blokovany
+  // slot rovnou odfiltroval a neplytvalo se casem na jeho odeslani. Pouziva
+  // aktualni cache (getRez/getGcalEvs), ktera se aktualizuje automaticky na
+  // pozadi - proto uz tu neni potreba znovu cekat na plny fetchGcalEvs()
+  // (stahovani 60 dni udalosti ze 2 kalendaru), coz odeslani zbytecne
+  // prodluzovalo. Skutecnou, autoritativni kontrolu ted dela server pri
+  // ukladani kazdeho slotu (viz saveRezToServer nize) - ten uz kontroluje
+  // primo a rychle jen dany termin, takze konflikt vzdy odchyti, i kdyby
+  // tahle lokalni cache byla zastarala.
   var rezNow=getRez().filter(function(r){return (r.status==='approved'||r.status==='pending')&&r.status!=='cancelled';});
   var okTimes=[];var blockedTimes=[];
   times.forEach(function(t){
@@ -1235,18 +1248,21 @@ async function submitBkImpl(){
 
   // Ulozeni na server AZ TEPRVE TEDA rozhoduje, co se skutecne potvrdi - viz
   // odpovidajici kontrola v Apps Scriptu (saveReservation), ktera je druha
-  // (a nejduleziteijsi) pojistka proti stejne chybe.
+  // (a nejduleziteijsi) pojistka proti stejne chybe. Vsechny sloty se
+  // odesilaji NAJEDNOU (paralelne), ne jeden po druhem - to byl hlavni duvod,
+  // proc odeslani pusobilo pomale. Apps Script ma pro zapis zamek
+  // (LockService), takze soubezne ulozeni vic slotu je bezpecne.
+  var results=await Promise.all(allEntries.map(function(e2){return saveRezToServer(e2);}));
   var savedEntries=[];
-  for(var i=0;i<allEntries.length;i++){
-    var e2=allEntries[i];
-    var res=await saveRezToServer(e2);
+  allEntries.forEach(function(e2,i){
+    var res=results[i];
     if(res&&res.status==='blocked'){
       toast('Termín '+e2.time+' už mezitím obsadil někdo jiný.');
-      continue;
+      return;
     }
     // res===null = server nedostupny -> pokracujeme optimisticky jako doposud
     savedEntries.push(e2);
-  }
+  });
   if(savedEntries.length===0){
     toast('Rezervaci se nepodařilo uložit, zkus to prosím znovu.');
     return;
