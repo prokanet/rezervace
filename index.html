@@ -710,6 +710,48 @@ async function addToCalendarDirectly(entry){
   }catch(e){console.warn('Calendar write error:',e.message);}
 }
 
+// Seskupi rezervace se stejnou zonou/datem, ktere na sebe casove primo
+// navazuji (rozdil = delka jednoho slotu), aby se do Google kalendare
+// zapsaly jako JEDNA souvisla udalost (napr. 16:00-17:00) misto dvou
+// oddelenych 30min bloku vedle sebe.
+function groupContiguousEntries(entries){
+  if(!entries.length)return[];
+  var sorted=entries.slice().sort(function(a,b){return a.time.localeCompare(b.time);});
+  var groups=[];var cur=[sorted[0]];
+  for(var i=1;i<sorted.length;i++){
+    var prev=cur[cur.length-1];
+    var stepMin=(prev.zone==='Oxygen Capacity')?60:30;
+    var pp=prev.time.split(':');var cp=sorted[i].time.split(':');
+    var prevMin=parseInt(pp[0])*60+parseInt(pp[1]);
+    var curMin=parseInt(cp[0])*60+parseInt(cp[1]);
+    if(curMin-prevMin===stepMin){cur.push(sorted[i]);}
+    else{groups.push(cur);cur=[sorted[i]];}
+  }
+  groups.push(cur);
+  return groups;
+}
+
+async function addToCalendarMergedDirectly(group){
+  try{
+    var first=group[0];
+    var last=group[group.length-1];
+    var stepMin=(first.zone==='Oxygen Capacity')?60:30;
+    var lp=last.time.split(':');
+    var endMin=parseInt(lp[1])+stepMin;
+    var endHour=parseInt(lp[0]);
+    if(endMin>=60){endMin-=60;endHour+=1;}
+    var endTime=String(endHour).padStart(2,'0')+':'+String(endMin).padStart(2,'0');
+    var payload={
+      zone:first.zone,date:first.date,name:first.name,email:first.email,phone:first.phone,
+      allParticipants:first.allParticipants,startTime:first.time,endTime:endTime,
+      ids:group.map(function(g){return g.id;})
+    };
+    var url=APPS_URL+'?action=addToCalendarMerged&data='+encodeURIComponent(JSON.stringify(payload));
+    await fetch(url,{cache:'no-store'});
+    console.log('Pripsano do kalendare (sloucene):', payload.ids.join(','), payload.startTime+'-'+endTime);
+  }catch(e){console.warn('Calendar write error (merged):',e.message);}
+}
+
 async function saveRezToServer(entry){
   // Vraci parsovanou odpoved serveru ({status:'ok'} nebo {status:'blocked',...}),
   // nebo null pokud server nebyl dostupny (pak submitBk() pokracuje optimisticky,
@@ -1217,10 +1259,14 @@ async function submitBkImpl(){
   // Posli potvrzovaci email ihned pro auto-schvalene rezervace
   if(initStatus==='approved'){
     sendConfirmEmail(entry);
-    // Zapis do Google Kalendare ihned (bez cekani na schvaleni) - VSECHNY
-    // vybrane sloty, ne jen prvni (puvodne se pri vice slotech zapsal jen
-    // jeden termin).
-    savedEntries.forEach(function(e2){addToCalendarDirectly(e2);});
+    // Zapis do Google Kalendare ihned (bez cekani na schvaleni) - po sobe
+    // jdouci sloty (napr. 16:00 + 16:30) spojime do JEDNE udalosti
+    // (16:00-17:00); nesousedici sloty (napr. 15:00 a 17:00) zustanou jako
+    // samostatne udalosti.
+    groupContiguousEntries(savedEntries).forEach(function(g){
+      if(g.length>1)addToCalendarMergedDirectly(g);
+      else addToCalendarDirectly(g[0]);
+    });
   }
   // Notifikace se posila pres saveReservation v Apps Scriptu
   document.getElementById('bk-ref').textContent='REF: #'+id;
