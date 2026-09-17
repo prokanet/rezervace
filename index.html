@@ -711,9 +711,14 @@ async function addToCalendarDirectly(entry){
 }
 
 async function saveRezToServer(entry){
+  // Vraci parsovanou odpoved serveru ({status:'ok'} nebo {status:'blocked',...}),
+  // nebo null pokud server nebyl dostupny (pak submitBk() pokracuje optimisticky,
+  // stejne jako doposud).
   try{
-    await fetch(APPS_URL+'?action=saveReservation&data='+encodeURIComponent(JSON.stringify(entry)),{cache:'no-store'});
-  }catch(e){console.warn('saveRez server error:',e.message);}
+    var res=await fetch(APPS_URL+'?action=saveReservation&data='+encodeURIComponent(JSON.stringify(entry)),{cache:'no-store'});
+    if(!res.ok)return null;
+    return await res.json();
+  }catch(e){console.warn('saveRez server error:',e.message);return null;}
 }
 
 async function approveRezOnServer(id){
@@ -1113,11 +1118,8 @@ function fillSummary(){
   else{document.getElementById('cs-note-row').style.display='none';}
 }
 
-function submitBk(){
+async function submitBk(){
   var id=genId();
-  // Urcit stav - schvaleni pouze kdyz je trenink ve Velke a rezervace je do Male
-  var needsApproval = bk.zone==='Malá posilovna' && isGcal('Velká posilovna',bk.date,bk.time);
-  var initStatus = needsApproval ? 'pending' : 'approved';
   var times=(bk.times&&bk.times.length>0)?bk.times:[bk.time];
   var multi=document.getElementById('f-multi')&&document.getElementById('f-multi').checked;
   var cap2=CAP[bk.zone]||1;
@@ -1133,18 +1135,68 @@ function submitBk(){
     if(guestCount>=2){var g2f=document.getElementById('f-guest2-first').value.trim();var g2l=document.getElementById('f-guest2-last').value.trim();if(!g2f||!g2l){toast('Vyplň jméno a příjmení účastníka 3.');return;}guests+=', '+g2f+' '+g2l;}
     if(guestCount>=3){var g3f=document.getElementById('f-guest3-first').value.trim();var g3l=document.getElementById('f-guest3-last').value.trim();if(!g3f||!g3l){toast('Vyplň jméno a příjmení účastníka 4.');return;}guests+=', '+g3f+' '+g3l;}
   }
-  var allEntries=[];
+
+  // FINALNI KONTROLA PRED ODESLANIM
+  // Mezi zobrazenim slotu (buildSlots) a kliknutim na "Odeslat rezervaci" mohl v
+  // Google kalendari vzniknout novy trenink, nebo mohl slot obsadit jiny klient.
+  // Bez tohoto prekontrolovani (a bez cerstveho fetchGcalEvs() pred nim) by
+  // rezervace mohla projit i do mezitim obsazeneho/blokovaneho terminu - presne
+  // tato mezera umoznila rezervaci Velke posilovny behem naplanovaneho treninku.
+  try{ await fetchGcalEvs(); }catch(e){}
+  var rezNow=getRez().filter(function(r){return (r.status==='approved'||r.status==='pending')&&r.status!=='cancelled';});
+  var okTimes=[];var blockedTimes=[];
   times.forEach(function(t){
+    var taken=rezNow.filter(function(r){return r.zone===bk.zone&&r.date===bk.date&&r.time===t;}).length;
+    var full=taken>=cap2;
+    var lb=!full&&isLinked(bk.zone,bk.date,t,rezNow);
+    var gc=!full&&!lb&&isGcal(bk.zone,bk.date,t);
+    if(full||lb||gc)blockedTimes.push(t);else okTimes.push(t);
+  });
+  if(okTimes.length===0){
+    toast('Tento termín je bohužel už obsazený nebo blokovaný (trénink/jiná rezervace). Zvol prosím jiný čas.');
+    bk.time='';bk.times=[];
+    if(document.getElementById('slots-sec')&&document.getElementById('slots-sec').style.display!=='none')buildSlots();
+    return;
+  }
+  if(blockedTimes.length>0){
+    toast('Termín(y) '+blockedTimes.join(', ')+' už mezitím nejsou volné, byly vynechány.');
+  }
+
+  // Urcit stav - schvaleni pouze kdyz je trenink ve Velke a rezervace je do Male
+  var needsApproval = bk.zone==='Malá posilovna' && isGcal('Velká posilovna',bk.date,okTimes[0]);
+  var initStatus = needsApproval ? 'pending' : 'approved';
+
+  var allEntries=[];
+  okTimes.forEach(function(t){
     var eid=genId();
     var noteWithGuests=bk.note+(guests?'\nDalší účastníci: '+guests:'');
     var e2={zone:bk.zone,date:bk.date,dateLabel:bk.dateLabel,time:t,name:bk.name,email:bk.email,phone:bk.phone,note:noteWithGuests,allParticipants:bk.allParticipants||bk.name,id:eid,status:initStatus,createdAt:new Date().toISOString()};
     allEntries.push(e2);
   });
-  var entry=allEntries[0];
+
+  // Ulozeni na server AZ TEPRVE TEDA rozhoduje, co se skutecne potvrdi - viz
+  // odpovidajici kontrola v Apps Scriptu (saveReservation), ktera je druha
+  // (a nejduleziteijsi) pojistka proti stejne chybe.
+  var savedEntries=[];
+  for(var i=0;i<allEntries.length;i++){
+    var e2=allEntries[i];
+    var res=await saveRezToServer(e2);
+    if(res&&res.status==='blocked'){
+      toast('Termín '+e2.time+' už mezitím obsadil někdo jiný.');
+      continue;
+    }
+    // res===null = server nedostupny -> pokracujeme optimisticky jako doposud
+    savedEntries.push(e2);
+  }
+  if(savedEntries.length===0){
+    toast('Rezervaci se nepodařilo uložit, zkus to prosím znovu.');
+    return;
+  }
+
+  var entry=savedEntries[0];
   var list=getRez();
-  allEntries.forEach(function(e2){list.push(e2);});
+  savedEntries.forEach(function(e2){list.push(e2);});
   saveRez(list);
-  allEntries.forEach(function(e2){saveRezToServer(e2);});
   // Posli potvrzovaci email ihned pro auto-schvalene rezervace
   if(initStatus==='approved'){
     sendConfirmEmail(entry);
