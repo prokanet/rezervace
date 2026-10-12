@@ -631,7 +631,7 @@ td{padding:12px 16px;font-size:13px;vertical-align:middle;}
           <option>Oxygen Capacity</option>
         </select>
         <select class="fin" id="adm-date" onchange="renderTbl()"><option value="">Všechna data</option></select>
-        <button class="btn-del" onclick="if(confirm('Smazat VŠECHNY rezervace?')){localStorage.removeItem('fitR3');refreshAdm();}">Smazat vše</button>
+        <button class="btn-del" onclick="deleteAllRez()">Smazat vše</button>
       </div>
       <div class="tbl-wrap">
         <table>
@@ -664,6 +664,11 @@ var CAP={'Malá posilovna':1,'Velká posilovna':3,'Airbike':1,'Veslování':1,'O
 // Blokovaci logika je nyni custom per-zona
 var GCAL_BL=['Velká posilovna','Airbike','Veslování'];
 var ZLABELS={'Malá posilovna':'Malá posilovna','Velká posilovna':'Velká posilovna','Airbike':'Kardio – Airbike','Veslování':'Kardio – Veslování','Oxygen Capacity':'Oxygen Capacity'};
+var OCT_SWITCH='2026-09-22'; // od tohoto data jsou OCT lekce v utery (driv ve stredu)
+
+// Pocitadlo probihajicich zapisu (admin akce, storno...) - po dobu zapisu se
+// nespousti automaticke obnoveni dat, aby neprepsalo lokalni zmenu starym stavem.
+var _busy=0;
 
 // CENTRALNI DATABAZE pres Apps Script
 var _rezCache = null;
@@ -675,7 +680,7 @@ function getRez(){
 
 function saveRez(a){
   _rezCache = a;
-  localStorage.setItem('fitR3',JSON.stringify(a));
+  try{localStorage.setItem('fitR3',JSON.stringify(a));}catch(e){}
 }
 
 async function loadRezFromServer(){
@@ -685,13 +690,35 @@ async function loadRezFromServer(){
     var data = await res.json();
     if(Array.isArray(data)){
       _rezCache = data;
-      localStorage.setItem('fitR3',JSON.stringify(data));
-      console.log('Rezervace ze serveru: '+data.length);
+      try{localStorage.setItem('fitR3',JSON.stringify(data));}catch(e){}
+      return true;
     }
+    return false;
   }catch(e){
     console.warn('Server nedostupny, pouzivam localStorage:', e.message);
-    try{_rezCache=JSON.parse(localStorage.getItem('fitR3')||'[]');}catch(e2){_rezCache=[];}
+    if(_rezCache===null){
+      try{_rezCache=JSON.parse(localStorage.getItem('fitR3')||'[]');}catch(e2){_rezCache=[];}
+    }
+    return false;
   }
+}
+
+// Obnovi rezervace ze serveru a prekresli mrizku casu (pokud je zrovna videt).
+// Vola se: pri vstupu do kroku 2, pri vyberu data, pri navratu na zalozku
+// a kazdych 30 s.
+async function refreshRezAndSlots(){
+  if(_busy>0||window._submitBkBusy)return;
+  await loadRezFromServer();
+  rebuildSlotsView();
+  var ap=document.getElementById('page-admin');
+  if(localStorage.getItem('admIn')==='1'&&ap&&ap.classList.contains('active'))refreshAdm();
+}
+
+function rebuildSlotsView(){
+  var sec=document.getElementById('slots-sec');
+  var sp2=document.getElementById('sp2');
+  if(!sec||sec.style.display==='none'||!sp2||!sp2.classList.contains('active'))return;
+  if(bk.zone==='Oxygen Capacity'||bk.date)buildSlots();
 }
 
 function nameToAbbr(fullName){
@@ -704,7 +731,6 @@ function nameToAbbr(fullName){
 
 async function addToCalendarDirectly(entry){
   try{
-    // Sestav nazev - hlavni ucastnik + hosté
     var title=entry.allParticipants||entry.name;
     var entryWithTitle=Object.assign({},entry,{calTitle:title});
     var url = APPS_URL+'?action=addToCalendar&data='+encodeURIComponent(JSON.stringify(entryWithTitle));
@@ -714,9 +740,7 @@ async function addToCalendarDirectly(entry){
 }
 
 // Seskupi rezervace se stejnou zonou/datem, ktere na sebe casove primo
-// navazuji (rozdil = delka jednoho slotu), aby se do Google kalendare
-// zapsaly jako JEDNA souvisla udalost (napr. 16:00-17:00) misto dvou
-// oddelenych 30min bloku vedle sebe.
+// navazuji, aby se do Google kalendare zapsaly jako JEDNA souvisla udalost.
 function groupContiguousEntries(entries){
   if(!entries.length)return[];
   var sorted=entries.slice().sort(function(a,b){return a.time.localeCompare(b.time);});
@@ -756,9 +780,8 @@ async function addToCalendarMergedDirectly(group){
 }
 
 async function saveRezToServer(entry){
-  // Vraci parsovanou odpoved serveru ({status:'ok'} nebo {status:'blocked',...}),
-  // nebo null pokud server nebyl dostupny (pak submitBk() pokracuje optimisticky,
-  // stejne jako doposud).
+  // Vraci parsovanou odpoved serveru ({status:'ok'} / {status:'blocked',...}),
+  // nebo null pokud se server nepodarilo zavolat / vratil chybu.
   try{
     var res=await fetch(APPS_URL+'?action=saveReservation&data='+encodeURIComponent(JSON.stringify(entry)),{cache:'no-store'});
     if(!res.ok)return null;
@@ -794,9 +817,7 @@ var _gcalEvsCache = null;
 var _gcalEvsFetched = false;
 
 function getGcalEvs(){
-  // Return cached data if available
   if(_gcalEvsCache !== null) return _gcalEvsCache;
-  // Return localStorage as fallback while async fetch is pending
   try{return JSON.parse(localStorage.getItem('fitGcalEvs')||'[]');}catch(e){return [];}
 }
 
@@ -807,16 +828,8 @@ async function fetchGcalEvs(){
     var data=await res.json();
     if(Array.isArray(data)){
       _gcalEvsCache=data;
-      localStorage.setItem('fitGcalEvs',JSON.stringify(data));
-      if(document.getElementById('slots-sec')&&document.getElementById('slots-sec').style.display!=='none'){
-        if(bk.zone==='Oxygen Capacity'){
-          var g=document.getElementById('slots-grid');
-          var rez2=getRez().filter(function(r){return (r.status==='approved'||r.status==='pending')&&r.status!=='cancelled';});
-          buildGroupSlots(rez2,g,CAP['Oxygen Capacity']||4);
-        } else if(bk.date){
-          buildSlots();
-        }
-      }
+      try{localStorage.setItem('fitGcalEvs',JSON.stringify(data));}catch(e){}
+      rebuildSlotsView();
       console.log('GCal: nacteno '+data.length+' udalosti');
     }
   }catch(e){
@@ -824,7 +837,9 @@ async function fetchGcalEvs(){
     try{_gcalEvsCache=JSON.parse(localStorage.getItem('fitGcalEvs')||'[]');}catch(e2){_gcalEvsCache=[];}
   }
 }
-function isoToday(){return new Date().toISOString().split('T')[0];}
+// Lokalni datum ve formatu YYYY-MM-DD (toISOString by davalo UTC = o den driv kolem pulnoci)
+function localIso(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+function isoToday(){return localIso(new Date());}
 function fmtDate(iso){var d=new Date(iso+'T12:00:00');return DAYS[d.getDay()]+' '+d.getDate()+'. '+MONTHS_F[d.getMonth()];}
 function genId(){return 'F-'+Math.random().toString(36).substr(2,6).toUpperCase();}
 
@@ -843,6 +858,7 @@ function showPage(id,btn){
     document.getElementById('adm-login-wrap').style.display='none';
     document.getElementById('adm-dash').style.display='block';
     refreshAdm();initGcal();
+    refreshRezAndSlots();
   }
 }
 function navTo(btn){showPage(btn.getAttribute('data-page'),btn);}
@@ -857,30 +873,22 @@ function goStep(n){
     var capN=CAP[bk.zone]||1;
     document.getElementById('sp2-sub').textContent='Kapacita: '+capN+(capN===1?' osoba':capN<5?' osoby':' osob');
     if(bk.zone==='Oxygen Capacity'){
-      // Pro skupinovou lekci - skryj date strip, zobraz rovnou terminy
       document.getElementById('date-section').style.display='none';
       document.getElementById('cas-label').textContent='DOSTUPNÉ TERMÍNY';
-      var rez2=getRez().filter(function(r){return (r.status==='approved'||r.status==='pending')&&r.status!=='cancelled';});
-      var grid2=document.getElementById('slots-grid');
       document.getElementById('slots-sec').style.display='';
-      buildGroupSlots(rez2,grid2,capN);
     } else {
       document.getElementById('date-section').style.display='';
       document.getElementById('cas-label').textContent='ČAS';
       buildDates();
-      if(bk.date)buildSlots();
     }
   }
   if(n===3&&(!bk.date||!bk.time)){toast('Vyber datum a čas.');return;}
   if(n===3){
-    // Zobraz/skryj checkbox "více lidí" dle kapacity
     var cap=CAP[bk.zone]||1;
-    var maxGuests=cap-1; // kolik lidí navíc může vzít
+    var maxGuests=cap-1;
     var multiWrap=document.querySelector('.fi-multi-wrap');
     if(multiWrap)multiWrap.style.display=maxGuests>0?'':'none';
-    // Nastav max počet hostů
     window._maxGuests=maxGuests;
-    // Reset guest count dle kapacity
     guestCount=1;
     ['fi-guest2','fi-guest3'].forEach(function(id){
       var el=document.getElementById(id);if(el)el.style.display='none';
@@ -898,15 +906,15 @@ function goStep(n){
     var recaptchaResp=typeof grecaptcha!=='undefined'?grecaptcha.getResponse():'';
     if(typeof grecaptcha!=='undefined'&&!recaptchaResp){toast('Potvrď že nejsi robot pomocí reCAPTCHA.');return;}
     var nm=fn+' '+ln;
+    var tms=(bk.times&&bk.times.length>0)?bk.times:[bk.time];
     var existingRez=getRez().filter(function(r){
-      return r.email.toLowerCase()===em.toLowerCase()&&r.date===bk.date&&r.time===bk.time&&r.zone===bk.zone&&(r.status==='approved'||r.status==='pending');
+      return r.email.toLowerCase()===em.toLowerCase()&&r.date===bk.date&&tms.indexOf(r.time)!==-1&&r.zone===bk.zone&&(r.status==='approved'||r.status==='pending');
     });
     if(existingRez.length>0){toast('Na tento slot již máš rezervaci. Pokud ji chceš změnit, nejdřív ji stornuj.');return;}
     bk.name=nm;bk.email=em;
     bk.phone=document.getElementById('f-phone').value.trim();
     bk.note=document.getElementById('f-note').value.trim();
     fillSummary();
-    // Zobraz upozorneni na schvaleni pouze kdyz bude potreba
     var willNeedApproval=bk.zone==='Malá posilovna'&&isGcal('Velká posilovna',bk.date,bk.time);
     var pn=document.getElementById('pend-notice');
     if(pn)pn.style.display=willNeedApproval?'':'none';
@@ -920,6 +928,12 @@ function goStep(n){
     if(i<n){el.classList.add('done');pd.textContent='v';}
     else if(i===n){el.classList.add('active');pd.textContent=i;}
     else{pd.textContent=i;}
+  }
+  if(n===2){
+    // Nejdriv hned vykresli z cache, pak stahni cerstva data ze serveru
+    // a mrizku prekresli (jinak by uzivatel videl stary stav).
+    if(bk.zone==='Oxygen Capacity'||bk.date)buildSlots();
+    refreshRezAndSlots();
   }
   window.scrollTo({top:0,behavior:'smooth'});
 }
@@ -944,7 +958,7 @@ function buildDates(){
     var d=new Date();d.setDate(d.getDate()+i);i++;
     var dow=d.getDay();
     if(dow===0||dow===6)continue;
-    var iso=d.toISOString().split('T')[0];
+    var iso=localIso(d);
     var lbl=DAYS[d.getDay()]+' '+d.getDate()+'. '+MONTHS_F[d.getMonth()];
     var btn=document.createElement('button');
     btn.className='db'+(bk.date===iso?' sel':'');
@@ -956,52 +970,62 @@ function buildDates(){
         bk.date=isoD;bk.dateLabel=lblD;bk.time='';bk.times=[];
         buildSlots();
         document.getElementById('slots-sec').style.display='';
+        refreshRezAndSlots();
       };
     })(btn,iso,lbl);
     strip.appendChild(btn);shown++;
   }
 }
 
+// ---------- Pomocne funkce pro blokovaci logiku ----------
+function toMin(t){var p=t.split(':');return parseInt(p[0],10)*60+parseInt(p[1],10);}
+function zoneDur(z){return z==='Oxygen Capacity'?60:30;}
+// Prekryva rezervace r casove slot (date, time, dur minut)? OCT trva 60 min,
+// proto blokuje i navazujici pulhodinu (napr. OCT 15:30 blokuje i 16:00).
+function rezOverlaps(r,date,time,dur){
+  if(r.date!==date)return false;
+  var s=toMin(time),e=s+dur;
+  var rs=toMin(r.time),re=rs+zoneDur(r.zone);
+  return s<re&&e>rs;
+}
+// Den OCT lekci: do OCT_SWITCH streda (3), od OCT_SWITCH utery (2)
+function octDow(date){return date>=OCT_SWITCH?2:3;}
+function isBreakSlot(date,time){
+  return time==='16:30'&&new Date(date+'T12:00:00').getDay()===octDow(date);
+}
+
 // Blokovaci pravidla:
 // - Rezervace Kardia (Airbike/Veslovani) blokuje Malou posilovnu
 // - Rezervace Male posilovny blokuje Kardio
-// - Skupinova lekce blokuje Kardio + Malou posilovnu
+// - Skupinova lekce (OCT) blokuje Kardio + Malou + Velkou (a naopak)
 // - GCal trenink ve Velke blokuje Velkou + Kardio (ale NE Malou)
+// - Prestavka 16:30 v den OCT lekci: blokuje Velkou a Kardio, Mala zustava volna
 function isLinked(zone,date,time,rez){
   var kardio=['Airbike','Veslování'];
-  var hasKardio=rez.some(function(r){return kardio.indexOf(r.zone)!==-1&&r.date===date&&r.time===time;});
-  var hasMala=rez.some(function(r){return r.zone==='Malá posilovna'&&r.date===date&&r.time===time;});
-  var hasVelka=rez.some(function(r){return r.zone==='Velká posilovna'&&r.date===date&&r.time===time;});
-  var hasOCT=rez.some(function(r){return r.zone==='Oxygen Capacity'&&r.date===date&&r.time===time;});
-  // Blokuj 16:30 ve stredu vzdy - prestavka mezi lekcemi OCT (ne Mala posilovna)
-  if(time==='16:30'&&zone!=='Malá posilovna'){
-    var isWed=new Date(date+'T12:00:00').getDay()===3;
-    if(isWed)return true;
-  }
+  if(zone!=='Malá posilovna'&&zone!=='Oxygen Capacity'&&isBreakSlot(date,time))return true;
+  var dur=zoneDur(zone);
+  function has(test){return rez.some(function(r){return test(r.zone)&&rezOverlaps(r,date,time,dur);});}
+  var hasKardio=has(function(z){return kardio.indexOf(z)!==-1;});
+  var hasMala=has(function(z){return z==='Malá posilovna';});
+  var hasVelka=has(function(z){return z==='Velká posilovna';});
+  var hasOCT=has(function(z){return z==='Oxygen Capacity';});
 
-  // Kardio blokuje Malou
   if(zone==='Malá posilovna'&&hasKardio)return true;
-  // Mala blokuje Kardio
   if(kardio.indexOf(zone)!==-1&&hasMala)return true;
-  // OCT blokuje Kardio, Malou a Velkou
   if((zone==='Malá posilovna'||zone==='Velká posilovna'||kardio.indexOf(zone)!==-1)&&hasOCT)return true;
-  // Kdyz je nekdo v Male/Kardio/Velke, blokuje OCT
   if(zone==='Oxygen Capacity'&&(hasMala||hasKardio||hasVelka))return true;
   return false;
 }
 
-// Skupinove lekce jsou fixne kazdy stredu 15:30-16:30 a 17:00-18:00
-// Rezervace skupinovych lekci zobrazujeme az od pristi tyden
 function isGroupLesson(date,time){
   var d=new Date(date+'T12:00:00');
-  var sd=new Date(2026,8,22);var td=(d>=sd)?2:3;if(d.getDay()!==td)return false; // streda nebo utery
+  if(d.getDay()!==octDow(date))return false;
   return time==='15:30'||time==='16:00'||time==='17:00'||time==='17:30';
 }
 
-// Zjisti jestli je slot skupinove lekce (streda 15:30 nebo 17:00)
 function isGroupSlot(date,time){
   var d=new Date(date+'T12:00:00');
-  if(d.getDay()!==3)return false;
+  if(d.getDay()!==octDow(date))return false;
   return time==='15:30'||time==='17:00';
 }
 
@@ -1015,38 +1039,33 @@ function isGcal(zone,date,time){
 }
 
 function buildGroupSlots(rezIgnored,grid,cap){
+  grid.innerHTML='';
   var rez=getRez().filter(function(r){return (r.status==='approved'||r.status==='pending')&&r.status!=='cancelled';});
-  // Zobraz stredy od nejblizsi budouci stredy (vcetne dneska pokud je streda)
   var today=new Date();today.setHours(0,0,0,0);
   var dow=today.getDay();
   var switchDate=new Date(2026,8,22); // 22.9.2026 - prvni utery
-  // Najdi nejblizsi stredu (pred 22.9.) nebo utery (od 22.9.)
   var baseDay=today<switchDate?3:2; // 3=streda, 2=utery
   var daysToBase=((baseDay-dow)+7)%7;
   var firstDay=new Date(today);
   firstDay.setDate(today.getDate()+daysToBase);
 
-  // Najdi vsechny terminy - kazdy teden zkontroluj jestli je streda nebo utery
   var slots=[];
   for(var w=0;w<10;w++){
     var candidate=new Date(firstDay);
     candidate.setDate(firstDay.getDate()+w*7);
-    // Pokud jsme presli switchDate, posun na utery
     if(candidate>=switchDate&&candidate.getDay()===3){
-      // Toto je streda po switchDate - preskoc, nebo posun na utery
       candidate.setDate(candidate.getDate()-1); // streda -> utery
     } else if(candidate<switchDate&&candidate.getDay()===2){
-      // Toto je utery pred switchDate - preskoc
       continue;
     }
     var wed=candidate;
-    var iso=wed.getFullYear()+'-'+String(wed.getMonth()+1).padStart(2,'0')+'-'+String(wed.getDate()).padStart(2,'0');
+    var iso=localIso(wed);
     ['15:30','17:00'].forEach(function(t){
       var taken=rez.filter(function(r){return r.zone==='Oxygen Capacity'&&r.date===iso&&r.time===t;}).length;
       var gcBlock=isGcal('Oxygen Capacity',iso,t);
-      // Lekce trva 60 minut
+      var lBlock=isLinked('Oxygen Capacity',iso,t,rez);
       var endMin=t==='15:30'?'16:30':'18:00';
-      slots.push({date:iso,time:t,endTime:endMin,taken:taken,gcBlock:gcBlock,dateObj:wed});
+      slots.push({date:iso,time:t,endTime:endMin,taken:taken,gcBlock:gcBlock,lBlock:lBlock,dateObj:wed});
     });
   }
 
@@ -1055,22 +1074,25 @@ function buildGroupSlots(rezIgnored,grid,cap){
     return;
   }
 
-  // Vyrenderuj sloty
-  var DAYS=['Ne','Po','Út','St','Čt','Pá','So'];
+  var DAYS_L=['Ne','Po','Út','St','Čt','Pá','So'];
   var MONTHS_S=['led','úno','bře','dub','kvě','čvn','čvc','srp','zář','říj','lis','pro'];
   slots.forEach(function(s){
     var full=s.taken>=cap;
     var btn=document.createElement('button');
     var cls='sb';
     var lbl='';
-    var dateStr=DAYS[s.dateObj.getDay()]+' '+s.dateObj.getDate()+'. '+MONTHS_S[s.dateObj.getMonth()];
+    var dateStr=DAYS_L[s.dateObj.getDay()]+' '+s.dateObj.getDate()+'. '+MONTHS_S[s.dateObj.getMonth()];
+    var blocked=full||s.lBlock||s.gcBlock;
     if(full){cls+=' full';lbl='obsazeno ('+s.taken+'/'+cap+')';}
+    else if(s.lBlock){cls+=' lblock';lbl='blokováno';}
     else if(s.gcBlock){cls+=' gcblock';lbl='blokováno';}
     else{lbl='volno: '+(cap-s.taken)+'/'+cap;if(bk.date===s.date&&bk.time===s.time)cls+=' sel';}
+    // Vybrany termin se mezitim zablokoval -> zrusit vyber
+    if(blocked&&bk.date===s.date&&bk.time===s.time){bk.date='';bk.dateLabel='';bk.time='';bk.times=[];}
     btn.className=cls;
     btn.innerHTML='<span style="font-size:11px;font-weight:700;">'+dateStr+'</span><span style="font-size:12px;">'+s.time+'</span><span class="sa">'+lbl+'</span>';
     btn.style.cssText='padding:10px 8px;height:auto;min-height:60px;';
-    if(!full&&!s.gcBlock){
+    if(!blocked){
       (function(b,sd,st,sl){
         b.onclick=function(){
           document.querySelectorAll('.sb').forEach(function(x){x.classList.remove('sel');});
@@ -1078,6 +1100,7 @@ function buildGroupSlots(rezIgnored,grid,cap){
           bk.date=sd;
           bk.dateLabel=sl+' '+st;
           bk.time=st;
+          bk.times=[st];
           document.getElementById('slots-sec').style.display='';
         };
       })(btn,s.date,s.time,dateStr);
@@ -1091,23 +1114,28 @@ function buildSlots(){
   var cap=CAP[bk.zone]||1;
   var rez=getRez().filter(function(r){return (r.status==='approved'||r.status==='pending')&&r.status!=='cancelled';});
 
-  // Skupinova lekce - specialni sloty
   if(bk.zone==='Oxygen Capacity'){
     buildGroupSlots(rez,grid,cap);
     return;
   }
 
+  function dropTime(t){
+    if(bk.times&&bk.times.indexOf(t)!==-1){
+      bk.times=bk.times.filter(function(x){return x!==t;});
+      bk.time=bk.times[0]||'';
+    }
+  }
+
   SLOTS.forEach(function(t){
-    // Blokuj 16:30 ve stredu vzdy - prestavka mezi lekcemi
-    if(t==='16:30'&&bk.date){
-      var dow=new Date(bk.date+'T12:00:00').getDay();
-      if(dow===3){
-        var btn=document.createElement('button');
-        btn.className='sb lblock';
-        btn.innerHTML=t+'<span class="sa">přestávka</span>';
-        grid.appendChild(btn);
-        return;
-      }
+    // Prestavka 16:30 v den OCT lekci (streda do 16.9., utery od 22.9.);
+    // Mala posilovna zustava volna.
+    if(bk.zone!=='Malá posilovna'&&bk.date&&isBreakSlot(bk.date,t)){
+      dropTime(t);
+      var bbtn=document.createElement('button');
+      bbtn.className='sb lblock';
+      bbtn.innerHTML=t+'<span class="sa">přestávka</span>';
+      grid.appendChild(bbtn);
+      return;
     }
     var taken=rez.filter(function(r){return r.zone===bk.zone&&r.date===bk.date&&r.time===t;}).length;
     var full=taken>=cap;
@@ -1115,22 +1143,22 @@ function buildSlots(){
     var gc=!full&&!lb&&isGcal(bk.zone,bk.date,t);
     var btn=document.createElement('button');
     var cls='sb';var lbl='';
-    if(full){cls+=' full';lbl='obsazeno';}
-    else if(lb){cls+=' lblock';lbl='blokováno';}
-    else if(gc){cls+=' gcblock';lbl='trénink';}
-    else{lbl=cap>1?'volno: '+(cap-taken):'volné';if(bk.time===t)cls+=' sel';}
+    if(full){cls+=' full';lbl='obsazeno';dropTime(t);}
+    else if(lb){cls+=' lblock';lbl='blokováno';dropTime(t);}
+    else if(gc){cls+=' gcblock';lbl='trénink';dropTime(t);}
+    else{lbl=cap>1?'volno: '+(cap-taken):'volné';if(bk.times&&bk.times.indexOf(t)!==-1)cls+=' sel';}
     btn.className=cls;
     btn.setAttribute('data-t',t);btn.innerHTML=t+'<span class="sa">'+lbl+'</span>';
     if(!full&&!lb&&!gc){
       (function(b,ti){b.onclick=function(){
-  if(b.classList.contains('sel')){b.classList.remove('sel');}
-  else{b.classList.add('sel');}
-  var selTimes=[];
-  document.querySelectorAll('#slots-grid .sb.sel').forEach(function(x){selTimes.push(x.getAttribute('data-t'));});
-  selTimes.sort();
-  bk.times=selTimes;
-  bk.time=selTimes[0]||'';
-};})(btn,t);
+        if(b.classList.contains('sel')){b.classList.remove('sel');}
+        else{b.classList.add('sel');}
+        var selTimes=[];
+        document.querySelectorAll('#slots-grid .sb.sel').forEach(function(x){selTimes.push(x.getAttribute('data-t'));});
+        selTimes.sort();
+        bk.times=selTimes;
+        bk.time=selTimes[0]||'';
+      };})(btn,t);
     }
     grid.appendChild(btn);
   });
@@ -1140,7 +1168,6 @@ function fillSummary(){
   document.getElementById('cs-zone').textContent=ZLABELS[bk.zone]||bk.zone;
   document.getElementById('cs-date').textContent=bk.dateLabel;
   document.getElementById('cs-time').textContent=(bk.times&&bk.times.length>1)?bk.times.join(', '):bk.time;
-  // Sestav seznam všech účastníků
   var allNames=bk.name||'';
   var multi=document.getElementById('f-multi')&&document.getElementById('f-multi').checked;
   if(multi){
@@ -1152,7 +1179,6 @@ function fillSummary(){
     });
   }
   bk.allParticipants=allNames;
-  // Zobraz v souhrnu
   var csNames=document.getElementById('cs-names');
   if(csNames)csNames.textContent=allNames;
   var crNames=document.getElementById('cr-names');
@@ -1164,11 +1190,7 @@ function fillSummary(){
 }
 
 async function submitBk(){
-  // Zabranuje dvojitemu odeslani - submitBk je async a ceka na server (ulozeni
-  // kazdeho slotu), takze bez tohoto by tlacitko zustalo chvili klikatelne a
-  // druhy klik/tap behem cekani vytvoril duplicitni rezervace pro stejny vyber.
-  // Tlacitko se navic viditelne zablokuje a zmeni popisek, aby bylo jasne, ze
-  // se rezervace odesila.
+  // Zabranuje dvojitemu odeslani a viditelne zablokuje tlacitko.
   if(window._submitBkBusy)return;
   window._submitBkBusy=true;
   var btnSubmit=document.querySelector('button[onclick="submitBk()"]');
@@ -1193,7 +1215,6 @@ async function submitBkImpl(){
   var times=(bk.times&&bk.times.length>0)?bk.times:[bk.time];
   var multi=document.getElementById('f-multi')&&document.getElementById('f-multi').checked;
   var cap2=CAP[bk.zone]||1;
-  // Rezervace pro více lidí zabírá více míst
   var totalPeople=1+(multi?guestCount:0);
   if(totalPeople>cap2){toast('Celkový počet účastníků ('+totalPeople+') překračuje kapacitu '+cap2+' míst.');return;}
   var guests='';
@@ -1206,15 +1227,8 @@ async function submitBkImpl(){
     if(guestCount>=3){var g3f=document.getElementById('f-guest3-first').value.trim();var g3l=document.getElementById('f-guest3-last').value.trim();if(!g3f||!g3l){toast('Vyplň jméno a příjmení účastníka 4.');return;}guests+=', '+g3f+' '+g3l;}
   }
 
-  // RYCHLA LOKALNI KONTROLA (bez site) - jen aby se zjevne obsazeny/blokovany
-  // slot rovnou odfiltroval a neplytvalo se casem na jeho odeslani. Pouziva
-  // aktualni cache (getRez/getGcalEvs), ktera se aktualizuje automaticky na
-  // pozadi - proto uz tu neni potreba znovu cekat na plny fetchGcalEvs()
-  // (stahovani 60 dni udalosti ze 2 kalendaru), coz odeslani zbytecne
-  // prodluzovalo. Skutecnou, autoritativni kontrolu ted dela server pri
-  // ukladani kazdeho slotu (viz saveRezToServer nize) - ten uz kontroluje
-  // primo a rychle jen dany termin, takze konflikt vzdy odchyti, i kdyby
-  // tahle lokalni cache byla zastarala.
+  // Rychla lokalni kontrola (bez site) - jen vyfiltruje zjevne obsazene sloty.
+  // Autoritativni kontrolu dela server pri ukladani.
   var rezNow=getRez().filter(function(r){return (r.status==='approved'||r.status==='pending')&&r.status!=='cancelled';});
   var okTimes=[];var blockedTimes=[];
   times.forEach(function(t){
@@ -1225,16 +1239,12 @@ async function submitBkImpl(){
     if(full||lb||gc)blockedTimes.push(t);else okTimes.push(t);
   });
   if(okTimes.length===0){
-    toast('Tento termín je bohužel už obsazený nebo blokovaný (trénink/jiná rezervace). Zvol prosím jiný čas.');
+    toast('Tento termín je bohužel už obsazený nebo blokovaný. Zvol prosím jiný čas.');
     bk.time='';bk.times=[];
-    if(document.getElementById('slots-sec')&&document.getElementById('slots-sec').style.display!=='none')buildSlots();
+    goStep(2);
     return;
   }
-  if(blockedTimes.length>0){
-    toast('Termín(y) '+blockedTimes.join(', ')+' už mezitím nejsou volné, byly vynechány.');
-  }
 
-  // Urcit stav - schvaleni pouze kdyz je trenink ve Velke a rezervace je do Male
   var needsApproval = bk.zone==='Malá posilovna' && isGcal('Velká posilovna',bk.date,okTimes[0]);
   var initStatus = needsApproval ? 'pending' : 'approved';
 
@@ -1246,47 +1256,49 @@ async function submitBkImpl(){
     allEntries.push(e2);
   });
 
-  // Ulozeni na server AZ TEPRVE TEDA rozhoduje, co se skutecne potvrdi - viz
-  // odpovidajici kontrola v Apps Scriptu (saveReservation), ktera je druha
-  // (a nejduleziteijsi) pojistka proti stejne chybe. Vsechny sloty se
-  // odesilaji NAJEDNOU (paralelne), ne jeden po druhem - to byl hlavni duvod,
-  // proc odeslani pusobilo pomale. Apps Script ma pro zapis zamek
-  // (LockService), takze soubezne ulozeni vic slotu je bezpecne.
+  // Ulozeni vsech slotu na server paralelne. Server (LockService) je zapisuje bezpecne.
   var results=await Promise.all(allEntries.map(function(e2){return saveRezToServer(e2);}));
-  var savedEntries=[];
+
+  // Zdroj pravdy je server: znovu stahneme jeho seznam a overime, ze jsou nase
+  // rezervace opravdu ulozene (odpoved muze byt null i kdyz zapis probehl).
+  await loadRezFromServer();
+  var serverIds={};getRez().forEach(function(r){serverIds[r.id]=1;});
+
+  var savedEntries=[];var blockedNow=[];var failedNow=[];
   allEntries.forEach(function(e2,i){
     var res=results[i];
-    if(res&&res.status==='blocked'){
-      toast('Termín '+e2.time+' už mezitím obsadil někdo jiný.');
-      return;
-    }
-    // res===null = server nedostupny -> pokracujeme optimisticky jako doposud
-    savedEntries.push(e2);
+    if(res&&res.status==='blocked'){blockedNow.push(e2.time);return;}
+    if((res&&res.status==='ok')||serverIds[e2.id]){savedEntries.push(e2);return;}
+    failedNow.push(e2.time);
   });
+
   if(savedEntries.length===0){
-    toast('Rezervaci se nepodařilo uložit, zkus to prosím znovu.');
+    if(blockedNow.length)toast('Termín '+blockedNow.join(', ')+' už mezitím obsadil někdo jiný. Zvol prosím jiný čas.');
+    else toast('Rezervaci se nepodařilo uložit na server. Zkus to prosím znovu.');
+    bk.time='';bk.times=[];
+    goStep(2);
     return;
   }
+  var warn=[];
+  if(blockedTimes.length)warn.push('už nebyly volné: '+blockedTimes.join(', '));
+  if(blockedNow.length)warn.push('právě je obsadil někdo jiný: '+blockedNow.join(', '));
+  if(failedNow.length)warn.push('nepodařilo se uložit: '+failedNow.join(', '));
+  if(warn.length)toast('Část termínů vynechána ('+warn.join('; ')+').');
 
   var entry=savedEntries[0];
+  // Pokud se seznam ze serveru nepodarilo nacist, doplnime lokalni cache
   var list=getRez();
-  savedEntries.forEach(function(e2){list.push(e2);});
+  savedEntries.forEach(function(e2){if(!serverIds[e2.id])list.push(e2);});
   saveRez(list);
-  // Posli potvrzovaci email ihned pro auto-schvalene rezervace
+
   if(initStatus==='approved'){
     sendConfirmEmail(entry);
-    // Zapis do Google Kalendare ihned (bez cekani na schvaleni) - po sobe
-    // jdouci sloty (napr. 16:00 + 16:30) spojime do JEDNE udalosti
-    // (16:00-17:00); nesousedici sloty (napr. 15:00 a 17:00) zustanou jako
-    // samostatne udalosti.
     groupContiguousEntries(savedEntries).forEach(function(g){
       if(g.length>1)addToCalendarMergedDirectly(g);
       else addToCalendarDirectly(g[0]);
     });
   }
-  // Notifikace se posila pres saveReservation v Apps Scriptu
   document.getElementById('bk-ref').textContent='REF: #'+id;
-  // Uprav success screen podle stavu
   if(initStatus==='approved'){
     document.querySelector('#sp-ok h2').textContent='REZERVACE POTVRZENA!';
     document.querySelector('#sp-ok p').textContent='Tvoje rezervace byla úspěšně přijata. Těšíme se na tebe!';
@@ -1301,16 +1313,20 @@ async function submitBkImpl(){
   document.querySelectorAll('.sp').forEach(function(p){p.classList.remove('active');});
   document.getElementById('sp-ok').classList.add('active');
   document.querySelectorAll('.ps').forEach(function(p){p.classList.remove('active');});
-  toast(initStatus==='approved'?'Rezervace potvrzena! ✓':'Rezervace odeslána!');
+  if(!warn.length)toast(initStatus==='approved'?'Rezervace potvrzena! ✓':'Rezervace odeslána!');
 }
 
 function resetBk(){
-  bk={zone:'',date:'',dateLabel:'',time:'',name:'',email:'',phone:'',note:''};
+  bk={zone:'',date:'',dateLabel:'',time:'',times:[],name:'',email:'',phone:'',note:''};
   document.querySelectorAll('.zc').forEach(function(c){c.classList.remove('sel');});
   document.getElementById('kardio-sub').style.display='none';
   document.getElementById('slots-sec').style.display='none';
   document.getElementById('date-section').style.display='';
-  ['f-name','f-email','f-phone','f-note'].forEach(function(id){var el=document.getElementById(id);if(el)el.value='';});
+  ['f-firstname','f-lastname','f-email','f-phone','f-note','f-guest1-first','f-guest1-last','f-guest2-first','f-guest2-last','f-guest3-first','f-guest3-last'].forEach(function(id){var el=document.getElementById(id);if(el)el.value='';});
+  var multi=document.getElementById('f-multi');if(multi)multi.checked=false;
+  var fg=document.getElementById('fi-guests');if(fg)fg.style.display='none';
+  guestCount=1;
+  try{if(typeof grecaptcha!=='undefined')grecaptcha.reset();}catch(e){}
   document.querySelectorAll('.sp').forEach(function(p){p.classList.remove('active');});
   document.getElementById('sp1').classList.add('active');
   for(var i=1;i<=4;i++){var el=document.getElementById('ps'+i);el.classList.remove('active','done');el.querySelector('.pd').textContent=i;if(i===1)el.classList.add('active');}
@@ -1318,11 +1334,9 @@ function resetBk(){
 }
 
 function buildCalLink(r){
-  // Sestav Google Calendar odkaz
   var zone = ZLABELS[r.zone]||r.zone;
   var title = encodeURIComponent('BlueGym – ' + zone);
   var desc = encodeURIComponent('Rezervace BlueGym\nRef: ' + r.id + '\nProstor: ' + zone);
-  // Datum a cas - format YYYYMMDDTHHmmss
   var dateParts = r.date.split('-');
   var timeParts = r.time.split(':');
   var year = dateParts[0];
@@ -1330,7 +1344,6 @@ function buildCalLink(r){
   var day = dateParts[2];
   var hour = timeParts[0];
   var min = timeParts[1];
-  // Konec: +30 minut (OCT +60 minut)
   var endMin = parseInt(min) + (r.zone === 'Oxygen Capacity' ? 60 : 30);
   var endHour = parseInt(hour);
   if(endMin >= 60){ endMin -= 60; endHour += 1; }
@@ -1365,6 +1378,7 @@ function admLogin(){
     document.getElementById('adm-dash').style.display='block';
     document.getElementById('lerr').style.display='none';
     refreshAdm();initGcal();
+    refreshRezAndSlots();
   }else{document.getElementById('lerr').style.display='block';}
 }
 function admLogout(){
@@ -1384,24 +1398,44 @@ function adminAction(btn, action) {
   if (action === 'approve') approveRez(id);
   else if (action === 'delete') deleteRez(id);
 }
-function approveRez(id){
+async function approveRez(id){
   var list=getRez();
   var r=list.find(function(x){return x.id===id;});
-  if(r){
+  if(!r)return;
+  _busy++;
+  try{
     r.status='approved';
     saveRez(list);
     refreshAdm();
     sendConfirmEmail(r);
-    approveRezOnServer(id);
+    await approveRezOnServer(id);
+    await loadRezFromServer();
+    refreshAdm();
     toast('Rezervace schválena!');
-  }
+  }finally{_busy--;}
 }
-function deleteRez(id){
+async function deleteRez(id){
   if(!confirm('Smazat rezervaci '+id+'?'))return;
-  saveRez(getRez().filter(function(r){return r.id!==id;}));
-  refreshAdm();
-  deleteRezOnServer(id);
-  toast('Smazáno.');
+  _busy++;
+  try{
+    saveRez(getRez().filter(function(r){return r.id!==id;}));
+    refreshAdm();
+    await deleteRezOnServer(id);
+    await loadRezFromServer();
+    refreshAdm();
+    toast('Smazáno.');
+  }finally{_busy--;}
+}
+async function deleteAllRez(){
+  if(!confirm('Smazat VŠECHNY rezervace? Smažou se i ze serveru a z Google Kalendáře. Akci nelze vrátit.'))return;
+  _busy++;
+  try{
+    await deleteAllOnServer();
+    saveRez([]);
+    await loadRezFromServer();
+    refreshAdm();
+    toast('Všechny rezervace smazány.');
+  }finally{_busy--;}
 }
 function refreshAdm(){
   var list=getRez();var today=isoToday();
@@ -1434,7 +1468,7 @@ function renderTbl(){
   }).sort(function(a,b){
     if(a.status==='pending'&&b.status!=='pending')return -1;
     if(b.status==='pending'&&a.status!=='pending')return 1;
-    return b.createdAt.localeCompare(a.createdAt);
+    return (b.createdAt||'').localeCompare(a.createdAt||'');
   });
   var tbody=document.getElementById('adm-tbody');
   var empty=document.getElementById('adm-empty');
@@ -1446,27 +1480,23 @@ function renderTbl(){
     var zl=ZLABELS[r.zone]||r.zone;
     var tr=document.createElement('tr');
 
-    // ID cell
     var td1=document.createElement('td');
     td1.setAttribute('data-label','REF');
     td1.style.cssText='font-family:"Poppins",sans-serif;font-weight:700;color:var(--muted);font-size:11px;';
     td1.textContent=r.id;
     tr.appendChild(td1);
 
-    // Name cell
     var td2=document.createElement('td');
     td2.setAttribute('data-label','Jméno');
     td2.innerHTML='<strong>'+r.name+'</strong>'+(r.phone?'<br><span style="font-size:11px;color:var(--muted)">'+r.phone+'</span>':'');
     tr.appendChild(td2);
 
-    // Email cell
     var td3=document.createElement('td');
     td3.setAttribute('data-label','Kontakt');
     td3.style.fontSize='12px';
     td3.innerHTML=r.email+(r.note?'<br><span style="color:var(--muted)">'+r.note.substring(0,30)+'</span>':'');
     tr.appendChild(td3);
 
-    // Zone cell
     var td4=document.createElement('td');
     td4.setAttribute('data-label','Prostor');
     var zspan=document.createElement('span');
@@ -1475,19 +1505,16 @@ function renderTbl(){
     td4.appendChild(zspan);
     tr.appendChild(td4);
 
-    // Date cell
     var td5=document.createElement('td');
     td5.setAttribute('data-label','Datum');
     td5.textContent=r.date;
     tr.appendChild(td5);
 
-    // Time cell
     var td6=document.createElement('td');
     td6.setAttribute('data-label','Čas');
     td6.innerHTML='<strong>'+r.time+'</strong>';
     tr.appendChild(td6);
 
-    // Status cell
     var td7=document.createElement('td');
     td7.setAttribute('data-label','Stav');
     var sspan=document.createElement('span');
@@ -1496,7 +1523,6 @@ function renderTbl(){
     td7.appendChild(sspan);
     tr.appendChild(td7);
 
-    // Actions cell
     var td8=document.createElement('td');
     var actDiv=document.createElement('div');
     td8.setAttribute('data-label','Akce');
@@ -1524,7 +1550,6 @@ function toggleGuests(cb){
   var fi=document.getElementById('fi-guests');
   if(fi)fi.style.display=cb.checked?'':'none';
   if(cb.checked){
-    // Zobraz tlačítko přidat jen pokud kapacita dovoluje víc než 1 hosta
     var btn=document.getElementById('btn-add-guest');
     if(btn)btn.style.display=(window._maxGuests||3)>1?'':'none';
   }
@@ -1569,11 +1594,13 @@ function submitNovyKlient(){
   toast('Odesláno!');
 }
 
-function findReservation() {
+async function findReservation() {
   var ref = document.getElementById('st-ref').value.trim().toUpperCase();
   var email = document.getElementById('st-email').value.trim().toLowerCase();
   var result = document.getElementById('storno-result');
   if (!ref || !email) { toast('Vyplň REF číslo a e-mail.'); return; }
+  // Cerstva data ze serveru (rezervace mohla vzniknout na jinem zarizeni)
+  await loadRezFromServer();
   var list = getRez();
   var r = list.find(function(x) { return x.id === ref && x.email.toLowerCase() === email; });
   result.style.display = '';
@@ -1621,14 +1648,18 @@ function findReservation() {
   });
 }
 
-function confirmStorno(id) {
+async function confirmStorno(id) {
   if (!confirm('Opravdu chceš stornovat tuto rezervaci?')) return;
   var list = getRez();
   var r = list.find(function(x) { return x.id === id; });
   if (!r) return;
-  r.status = 'cancelled';
-  saveRez(list);
-  cancelRezOnServer(id);
+  _busy++;
+  try{
+    r.status = 'cancelled';
+    saveRez(list);
+    await cancelRezOnServer(id);
+    await loadRezFromServer();
+  }finally{_busy--;}
   document.getElementById('storno-result').innerHTML =
     '<div class="storno-done">'
     + '<div class="suc-ring" style="background:var(--red);margin:0 auto 20px;">&#10006;</div>'
@@ -1662,12 +1693,12 @@ async function syncGcal(){
     if(!res.ok)throw new Error('HTTP '+res.status);
     var data=await res.json();
     if(!Array.isArray(data))throw new Error('Neplatna odpoved.');
-    localStorage.setItem('fitGcalEvs',JSON.stringify(data));
+    try{localStorage.setItem('fitGcalEvs',JSON.stringify(data));}catch(e){}
     _gcalEvsCache = data;
     document.getElementById('gcal-box').classList.remove('gcerr');
     document.getElementById('gcal-box').classList.add('synced');
     showGcalRes('ok','Synchronizováno — načteno '+data.length+' událostí.');
-    if(document.getElementById('slots-sec').style.display!=='none'&&bk.date)buildSlots();
+    rebuildSlotsView();
   }catch(e){
     document.getElementById('gcal-box').classList.add('gcerr');
     showGcalRes('err','Chyba: '+e.message);
@@ -1682,15 +1713,13 @@ function initGcal(){
 }
 
 window.addEventListener('DOMContentLoaded',function(){
-  // Nacti rezervace ze serveru pro vsechny uzivatele
   loadRezFromServer().then(function(){
-    // Po nacteni rezervaci refresh admin pokud je otevren
     if(localStorage.getItem('admIn')==='1'){
       var ap=document.getElementById('page-admin');
       if(ap&&ap.classList.contains('active')) refreshAdm();
     }
+    rebuildSlotsView();
   });
-  // Auto-fetch Google Calendar pro vsechny uzivatele
   fetchGcalEvs();
 
   if(localStorage.getItem('admIn')==='1'){
@@ -1702,6 +1731,15 @@ window.addEventListener('DOMContentLoaded',function(){
     }
   }
 });
+
+// Automaticke obnoveni: po navratu na zalozku/okno a kazdych 30 s,
+// aby uzivatel videl rezervace, ktere mezitim udelali jini lide.
+document.addEventListener('visibilitychange',function(){
+  if(!document.hidden)refreshRezAndSlots();
+});
+setInterval(function(){
+  if(!document.hidden)refreshRezAndSlots();
+},30000);
 </script>
 </body>
 </html>
