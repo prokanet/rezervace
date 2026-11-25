@@ -16,7 +16,7 @@
   --red:#dc3545;--green:#198754;--blue:#2B7EC1;
   --text:#0d2b5e;--muted:#6b7a8d;--muted2:#a0b0c0;
   --radius:10px;--rsm:6px;
-  --c-mala:#7c3aed;--c-velka:#2B7EC1;--c-kardio:#198754;--c-veslo:#0891b2;
+  --c-mala:#7c3aed;--c-velka:#2B7EC1;--c-kardio:#198754;--c-veslo:#0891b2;--c-skierg:#db2777;
 }
 *{box-sizing:border-box;margin:0;padding:0;}
 html{scroll-behavior:smooth;}
@@ -74,6 +74,9 @@ nav{display:flex;align-items:center;justify-content:space-between;padding:16px 3
 .zc[data-z="Oxygen Capacity"] .zcap{background:rgba(245,158,11,.12);color:#f59e0b;}
 .zc[data-z="Veslování"].sel{background:rgba(56,189,248,.06);}
 .zc[data-z="Veslování"] .zcap{background:rgba(56,189,248,.12);color:var(--c-veslo);}
+.zc[data-z="SkiErg"]:hover,.zc[data-z="SkiErg"].sel{border-color:var(--c-skierg);}
+.zc[data-z="SkiErg"].sel{background:rgba(219,39,119,.06);}
+.zc[data-z="SkiErg"] .zcap{background:rgba(219,39,119,.12);color:var(--c-skierg);}
 .kardio-sub{margin-top:24px;padding-top:22px;border-top:1px solid var(--border);}
 .kardio-banner{display:flex;align-items:center;gap:10px;padding:12px 16px;background:rgba(255,153,0,.06);border:1px solid rgba(255,153,0,.2);border-radius:var(--rsm);margin-bottom:14px;font-size:13px;color:var(--muted);}
 .kardio-banner strong{color:#ff9900;}
@@ -181,6 +184,7 @@ td{padding:12px 16px;font-size:13px;vertical-align:middle;}
 .zb.velka{background:rgba(251,146,60,.15);color:var(--c-velka);}
 .zb.airbike{background:rgba(52,211,153,.15);color:var(--c-kardio);}
 .zb.veslo{background:rgba(56,189,248,.15);color:var(--c-veslo);}
+.zb.skierg{background:rgba(219,39,119,.15);color:var(--c-skierg);}
 .zb.skupinova{background:rgba(245,158,11,.15);color:#f59e0b;}
 .stb{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;}
 .stb.pending{background:rgba(255,165,0,.15);color:#ffa500;}
@@ -417,7 +421,13 @@ td{padding:12px 16px;font-size:13px;vertical-align:middle;}
         <div class="zc" data-z="Veslování" onclick="selZone(this)">
           <span class="zi">&#128675;</span>
           <div class="zn">Veslování</div>
-          
+
+          <span class="zcap">Kapacita: 1 osoba</span>
+        </div>
+        <div class="zc" data-z="SkiErg" onclick="selZone(this)">
+          <span class="zi">&#9975;</span>
+          <div class="zn">SkiErg</div>
+
           <span class="zcap">Kapacita: 1 osoba</span>
         </div>
       </div>
@@ -628,6 +638,7 @@ td{padding:12px 16px;font-size:13px;vertical-align:middle;}
           <option>Velká posilovna</option>
           <option>Airbike</option>
           <option>Veslování</option>
+          <option>SkiErg</option>
           <option>Oxygen Capacity</option>
         </select>
         <select class="fin" id="adm-date" onchange="renderTbl()"><option value="">Všechna data</option></select>
@@ -660,10 +671,12 @@ var SLOTS=['06:30','07:00','07:30','08:00','08:30','09:00','09:30','10:00','10:3
 var DAYS=['Ne','Po','Út','St','Čt','Pá','So'];
 var MONTHS=['led','úno','bře','dub','kvě','čvn','čvc','srp','zář','říj','lis','pro'];
 var MONTHS_F=['ledna','února','března','dubna','května','června','července','srpna','září','října','listopadu','prosince'];
-var CAP={'Malá posilovna':1,'Velká posilovna':3,'Airbike':1,'Veslování':1,'Oxygen Capacity':4};
+var CAP={'Malá posilovna':1,'Velká posilovna':3,'Airbike':1,'Veslování':1,'SkiErg':1,'Oxygen Capacity':4};
+// Stroje Kardio zony - vsechny maji stejna blokovaci pravidla
+var KARDIO=['Airbike','Veslování','SkiErg'];
 // Blokovaci logika je nyni custom per-zona
-var GCAL_BL=['Velká posilovna','Airbike','Veslování'];
-var ZLABELS={'Malá posilovna':'Malá posilovna','Velká posilovna':'Velká posilovna','Airbike':'Kardio – Airbike','Veslování':'Kardio – Veslování','Oxygen Capacity':'Oxygen Capacity'};
+var GCAL_BL=['Velká posilovna'].concat(KARDIO);
+var ZLABELS={'Malá posilovna':'Malá posilovna','Velká posilovna':'Velká posilovna','Airbike':'Kardio – Airbike','Veslování':'Kardio – Veslování','SkiErg':'Kardio – SkiErg','Oxygen Capacity':'Oxygen Capacity'};
 var OCT_SWITCH='2026-09-22'; // od tohoto data jsou OCT lekce v utery (driv ve stredu)
 
 // Pocitadlo probihajicich zapisu (admin akce, storno...) - po dobu zapisu se
@@ -1029,13 +1042,13 @@ function isBreakSlot(date,time){
 }
 
 // Blokovaci pravidla:
-// - Rezervace Kardia (Airbike/Veslovani) blokuje Malou posilovnu
+// - Rezervace Kardia (Airbike/Veslovani/SkiErg) blokuje Malou posilovnu
 // - Rezervace Male posilovny blokuje Kardio
 // - Skupinova lekce (OCT) blokuje Kardio + Malou + Velkou (a naopak)
 // - GCal trenink ve Velke blokuje Velkou + Kardio (ale NE Malou)
 // - Prestavka 16:30 v den OCT lekci: blokuje Velkou a Kardio, Mala zustava volna
 function isLinked(zone,date,time,rez){
-  var kardio=['Airbike','Veslování'];
+  var kardio=KARDIO;
   if(zone!=='Malá posilovna'&&zone!=='Oxygen Capacity'&&isBreakSlot(date,time))return true;
   var dur=zoneDur(zone);
   function has(test){return rez.some(function(r){return test(r.zone)&&rezOverlaps(r,date,time,dur);});}
@@ -1306,14 +1319,22 @@ async function submitBkImpl(){
   await loadRezFromServer();
   var serverIds={};getRez().forEach(function(r){serverIds[r.id]=1;});
 
-  var savedEntries=[];var blockedNow=[];var failedNow=[];
+  var savedEntries=[];var blockedNow=[];var nospaceNow=[];var failedNow=[];
   allEntries.forEach(function(e2,i){
     var res=results[i];
+    if(res&&res.status==='blocked'&&res.reason==='nospace'){nospaceNow.push(e2.time);return;}
     if(res&&res.status==='blocked'){blockedNow.push(e2.time);return;}
     if((res&&res.status==='ok')||serverIds[e2.id]){savedEntries.push(e2);return;}
     failedNow.push(e2.time);
   });
 
+  if(savedEntries.length===0&&nospaceNow.length&&!blockedNow.length&&!failedNow.length){
+    // Server: termin neni plny, ale cela skupina se tam mezitim prestala vejit
+    toast('V termínu '+nospaceNow.join(', ')+' mezitím někdo obsadil část míst a všichni se tam už nevejdete. Uprav prosím počet účastníků.');
+    goStep(3);
+    return;
+  }
+  blockedNow=blockedNow.concat(nospaceNow);
   if(savedEntries.length===0){
     if(blockedNow.length)toast('Termín '+blockedNow.join(', ')+' už mezitím obsadil někdo jiný. Zvol prosím jiný čas.');
     else toast('Rezervaci se nepodařilo uložit na server. Zkus to prosím znovu.');
@@ -1519,7 +1540,7 @@ function renderTbl(){
   if(!filtered.length){empty.style.display='';return;}
   empty.style.display='none';
   filtered.forEach(function(r){
-    var bc=r.zone==='Malá posilovna'?'mala':r.zone==='Velká posilovna'?'velka':r.zone==='Airbike'?'airbike':r.zone==='Oxygen Capacity'?'skupinova':'veslo';
+    var bc=r.zone==='Malá posilovna'?'mala':r.zone==='Velká posilovna'?'velka':r.zone==='Airbike'?'airbike':r.zone==='SkiErg'?'skierg':r.zone==='Oxygen Capacity'?'skupinova':'veslo';
     var zl=ZLABELS[r.zone]||r.zone;
     var tr=document.createElement('tr');
 
