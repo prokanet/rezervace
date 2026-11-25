@@ -885,16 +885,33 @@ function goStep(n){
   if(n===3&&(!bk.date||!bk.time)){toast('Vyber datum a čas.');return;}
   if(n===3){
     var cap=CAP[bk.zone]||1;
-    var maxGuests=cap-1;
+    // Pocet hostu omezime podle skutecne volnych mist (pocitaji se osoby,
+    // ne rezervace). U vice slotu rozhoduje ten nejmene volny.
+    var rez3=getRez().filter(function(r){return r.status==='approved'||r.status==='pending';});
+    var tms3=(bk.times&&bk.times.length>0)?bk.times:[bk.time];
+    var freeMin=cap;
+    tms3.forEach(function(t){var f=cap-slotPeople(rez3,bk.zone,bk.date,t);if(f<freeMin)freeMin=f;});
+    var maxGuests=Math.max(0,Math.min(cap,freeMin)-1);
     var multiWrap=document.querySelector('.fi-multi-wrap');
     if(multiWrap)multiWrap.style.display=maxGuests>0?'':'none';
+    var multiLbl=document.querySelector('label[for="f-multi"]');
+    if(multiLbl)multiLbl.textContent='Rezervuji pro více lidí'+(maxGuests>0?' (volná místa: '+freeMin+')':'');
     window._maxGuests=maxGuests;
-    guestCount=1;
-    ['fi-guest2','fi-guest3'].forEach(function(id){
-      var el=document.getElementById(id);if(el)el.style.display='none';
+    var multiCb=document.getElementById('f-multi');
+    if(maxGuests===0&&multiCb&&multiCb.checked){multiCb.checked=false;toggleGuests(multiCb);}
+    // Uz vyplnene hosty zachovame (napr. pri navratu z kroku 4), jen nad limit je odebereme
+    if(guestCount>Math.max(1,maxGuests))guestCount=Math.max(1,maxGuests);
+    [2,3].forEach(function(k){
+      var el=document.getElementById('fi-guest'+k);
+      if(!el)return;
+      if(k<=guestCount){el.style.display='';}
+      else{
+        el.style.display='none';
+        ['first','last'].forEach(function(p){var inp=document.getElementById('f-guest'+k+'-'+p);if(inp)inp.value='';});
+      }
     });
     var btn=document.getElementById('btn-add-guest');
-    if(btn)btn.style.display=maxGuests>1?'':'none';
+    if(btn)btn.style.display=guestCount<maxGuests?'':'none';
   }
   if(n===4){
     var fn=document.getElementById('f-firstname').value.trim();
@@ -988,6 +1005,23 @@ function rezOverlaps(r,date,time,dur){
   var rs=toMin(r.time),re=rs+zoneDur(r.zone);
   return s<re&&e>rs;
 }
+// Pocet osob v jedne rezervaci (hlavni osoba + hoste).
+// Nove rezervace maji pole "people"; u starsich se hoste dopocitaji
+// z poznamky "Další účastníci: Jan Novák, Jana Nováková".
+function rezPeople(r){
+  var n=parseInt(r.people,10);
+  if(n>0)return n;
+  var m=/Další účastníci:\s*(.+)/.exec(r.note||'');
+  if(m)return 1+m[1].split(',').filter(function(s){return s.trim();}).length;
+  return 1;
+}
+// Kolik osob uz je v danem slotu (soucet pres vsechny rezervace, vcetne hostu).
+// rez musi byt uz vyfiltrovane na approved/pending.
+function slotPeople(rez,zone,date,time){
+  return rez.reduce(function(sum,r){
+    return (r.zone===zone&&r.date===date&&r.time===time)?sum+rezPeople(r):sum;
+  },0);
+}
 // Den OCT lekci: do OCT_SWITCH streda (3), od OCT_SWITCH utery (2)
 function octDow(date){return date>=OCT_SWITCH?2:3;}
 function isBreakSlot(date,time){
@@ -1061,7 +1095,7 @@ function buildGroupSlots(rezIgnored,grid,cap){
     var wed=candidate;
     var iso=localIso(wed);
     ['15:30','17:00'].forEach(function(t){
-      var taken=rez.filter(function(r){return r.zone==='Oxygen Capacity'&&r.date===iso&&r.time===t;}).length;
+      var taken=slotPeople(rez,'Oxygen Capacity',iso,t);
       var gcBlock=isGcal('Oxygen Capacity',iso,t);
       var lBlock=isLinked('Oxygen Capacity',iso,t,rez);
       var endMin=t==='15:30'?'16:30':'18:00';
@@ -1137,7 +1171,7 @@ function buildSlots(){
       grid.appendChild(bbtn);
       return;
     }
-    var taken=rez.filter(function(r){return r.zone===bk.zone&&r.date===bk.date&&r.time===t;}).length;
+    var taken=slotPeople(rez,bk.zone,bk.date,t);
     var full=taken>=cap;
     var lb=!full&&isLinked(bk.zone,bk.date,t,rez);
     var gc=!full&&!lb&&isGcal(bk.zone,bk.date,t);
@@ -1172,7 +1206,7 @@ function fillSummary(){
   var multi=document.getElementById('f-multi')&&document.getElementById('f-multi').checked;
   if(multi){
     ['f-guest1','f-guest2','f-guest3'].forEach(function(base,i){
-      if(i+1>window._maxGuests)return;
+      if(i+1>window._maxGuests||i+1>guestCount)return;
       var gf=document.getElementById(base+'-first');
       var gl=document.getElementById(base+'-last');
       if(gf&&gl&&gf.value.trim()&&gl.value.trim())allNames+=', '+gf.value.trim()+' '+gl.value.trim();
@@ -1230,14 +1264,22 @@ async function submitBkImpl(){
   // Rychla lokalni kontrola (bez site) - jen vyfiltruje zjevne obsazene sloty.
   // Autoritativni kontrolu dela server pri ukladani.
   var rezNow=getRez().filter(function(r){return (r.status==='approved'||r.status==='pending')&&r.status!=='cancelled';});
-  var okTimes=[];var blockedTimes=[];
+  var okTimes=[];var blockedTimes=[];var lackTimes=[];var lackFree=cap2;
   times.forEach(function(t){
-    var taken=rezNow.filter(function(r){return r.zone===bk.zone&&r.date===bk.date&&r.time===t;}).length;
+    var taken=slotPeople(rezNow,bk.zone,bk.date,t);
     var full=taken>=cap2;
     var lb=!full&&isLinked(bk.zone,bk.date,t,rezNow);
     var gc=!full&&!lb&&isGcal(bk.zone,bk.date,t);
-    if(full||lb||gc)blockedTimes.push(t);else okTimes.push(t);
+    if(full||lb||gc)blockedTimes.push(t);
+    else if(taken+totalPeople>cap2){lackTimes.push(t);if(cap2-taken<lackFree)lackFree=cap2-taken;}
+    else okTimes.push(t);
   });
+  if(okTimes.length===0&&lackTimes.length&&!blockedTimes.length){
+    // Termin neni plny, ale cela skupina se do nej uz nevejde -> zpet na udaje
+    toast('V termínu '+lackTimes.join(', ')+(lackFree===1?' zbývá už jen 1 volné místo':' zbývají už jen '+lackFree+' volná místa')+'. Uprav prosím počet účastníků.');
+    goStep(3);
+    return;
+  }
   if(okTimes.length===0){
     toast('Tento termín je bohužel už obsazený nebo blokovaný. Zvol prosím jiný čas.');
     bk.time='';bk.times=[];
@@ -1252,7 +1294,7 @@ async function submitBkImpl(){
   okTimes.forEach(function(t){
     var eid=genId();
     var noteWithGuests=bk.note+(guests?'\nDalší účastníci: '+guests:'');
-    var e2={zone:bk.zone,date:bk.date,dateLabel:bk.dateLabel,time:t,name:bk.name,email:bk.email,phone:bk.phone,note:noteWithGuests,allParticipants:bk.allParticipants||bk.name,id:eid,status:initStatus,createdAt:new Date().toISOString()};
+    var e2={zone:bk.zone,date:bk.date,dateLabel:bk.dateLabel,time:t,name:bk.name,email:bk.email,phone:bk.phone,note:noteWithGuests,allParticipants:bk.allParticipants||bk.name,people:totalPeople,id:eid,status:initStatus,createdAt:new Date().toISOString()};
     allEntries.push(e2);
   });
 
@@ -1281,6 +1323,7 @@ async function submitBkImpl(){
   }
   var warn=[];
   if(blockedTimes.length)warn.push('už nebyly volné: '+blockedTimes.join(', '));
+  if(lackTimes.length)warn.push('nevešli byste se tam všichni: '+lackTimes.join(', '));
   if(blockedNow.length)warn.push('právě je obsadil někdo jiný: '+blockedNow.join(', '));
   if(failedNow.length)warn.push('nepodařilo se uložit: '+failedNow.join(', '));
   if(warn.length)toast('Část termínů vynechána ('+warn.join('; ')+').');
